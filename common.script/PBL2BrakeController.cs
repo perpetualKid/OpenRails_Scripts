@@ -18,10 +18,10 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using ORTS.Scripting.Api;
-using Orts.Simulation.RollingStocks.SubSystems.Controllers;
+using Orts.Common;
+using Orts.Scripting.Api;
 
-namespace ORTS.Scripting.Script
+namespace Orts.Scripting.Script
 {
     public class PBL2BrakeController : BrakeController
     {
@@ -36,32 +36,28 @@ namespace ORTS.Scripting.Script
             Emergency
         }
 
-        public float OverchargeValue { get; private set; }
-        public float QuickReleaseValue { get; private set; }
-        public float ReleaseValue { get; private set; }
-        public float LapValue { get; private set; }
-        public float ApplyValue { get; private set; }
-        public float EmergencyValue { get; private set; }
+        private float overchargeValue;
+        private float quickReleaseValue;
+        private float releaseValue;
+        private float lapValue;
+        private float applyValue;
+        private float emergencyValue;
 
         // brake controller values
-        private float OverchargePressureBar = 0.4f;
-        private float OverchargeEleminationPressureRateBarpS = 0.0025f;
-        private float FirstDepressureBar = 0.5f;
-        private float BrakeReleasedDepressureBar = 0.2f;
+        private const double overchargePressureBar = 0.4;
+        private const double overchargeEleminationPressureRateBarpS = 0.0025;
+        private const double firstDepressureBar = 0.5;
+        private const double brakeReleasedDepressureBar = 0.2;
 
-        protected float CurrentPressure;
+        private State currentState;
 
-        private State CurrentState;
+        private bool firstDepression;
+        private bool overcharge;
+        private bool quickRelease;
+        private bool release;
+        private bool apply;
 
-        private bool FirstDepression = false;
-        private bool Neutral = false;
-        private bool Overcharge = false;
-        private bool OverchargeElimination = false;
-        private bool QuickRelease = false;
-        private bool Release = false;
-        private bool Apply = false;
-
-        private float RegulatorPressureBar = 0.0f;
+        private double regulatorPressureBar = 0.0;
 
         public PBL2BrakeController()
         {
@@ -69,27 +65,27 @@ namespace ORTS.Scripting.Script
 
         public override void Initialize()
         {
-            foreach (MSTSNotch notch in Notches())
+            foreach (INotchController notch in Notches())
             {
-                switch (notch.Type)
+                switch (notch.NotchStateType)
                 {
                     case ControllerState.Release:
-                        ReleaseValue = notch.Value;
+                        releaseValue = notch.Value;
                         break;
                     case ControllerState.FullQuickRelease:
-                        OverchargeValue = notch.Value;
-                        QuickReleaseValue = notch.Value;
+                        overchargeValue = notch.Value;
+                        quickReleaseValue = notch.Value;
                         break;
                     case ControllerState.Lap:
-                        LapValue = notch.Value;
+                        lapValue = notch.Value;
                         break;
                     case ControllerState.Apply:
                     case ControllerState.GSelfLap:
                     case ControllerState.GSelfLapH:
-                        ApplyValue = notch.Value;
+                        applyValue = notch.Value;
                         break;
                     case ControllerState.Emergency:
-                        EmergencyValue = notch.Value;
+                        emergencyValue = notch.Value;
                         break;
                 }
             }
@@ -99,57 +95,53 @@ namespace ORTS.Scripting.Script
         {
         }
 
-        public override float Update(float elapsedSeconds)
+        public override float Update(double elapsedSeconds)
         {
-            if (Apply)
-                SetCurrentValue(ApplyValue);
-            else if (Release)
-                SetCurrentValue(ReleaseValue);
+            if (apply)
+                SetCurrentValue(applyValue);
+            else if (release)
+                SetCurrentValue(releaseValue);
             else
-                SetCurrentValue(LapValue);
+                SetCurrentValue(lapValue);
 
             return CurrentValue();
         }
 
-        public override void UpdatePressure(ref float pressureBar, float elapsedClockSeconds, ref float epPressureBar)
+        public override Tuple<double, double> UpdatePressure(double pressureBar, double epPressureBar, double elapsedClockSeconds)
         {
-            RegulatorPressureBar = Math.Min(MaxPressureBar(), MainReservoirPressureBar());
+            regulatorPressureBar = Math.Min(MaxPressureBar(), MainReservoirPressureBar());
 
-            if (!FirstDepression && Apply && pressureBar > Math.Max(RegulatorPressureBar - FirstDepressureBar, 0))
-                FirstDepression = true;
-            else if (FirstDepression && pressureBar <= Math.Max(RegulatorPressureBar - FirstDepressureBar, 0))
-                FirstDepression = false;
+            if (!firstDepression && apply && pressureBar > Math.Max(regulatorPressureBar - firstDepressureBar, 0))
+                firstDepression = true;
+            else if (firstDepression && pressureBar <= Math.Max(regulatorPressureBar - firstDepressureBar, 0))
+                firstDepression = false;
 
-            if (Apply && Overcharge)
-                Overcharge = false;
-            if (Apply && QuickRelease)
-                QuickRelease = false;
+            if (apply && overcharge)
+                overcharge = false;
+            if (apply && quickRelease)
+                quickRelease = false;
 
             if (EmergencyBrakingPushButton() || TCSEmergencyBraking())
-                CurrentState = State.Emergency;
+                currentState = State.Emergency;
             else if (
-                Apply && pressureBar > RegulatorPressureBar - FullServReductionBar()
-                || FirstDepression && !Release && !QuickRelease && pressureBar > RegulatorPressureBar - FirstDepressureBar
+                apply && pressureBar > regulatorPressureBar - FullServReductionBar()
+                || firstDepression && !release && !quickRelease && pressureBar > regulatorPressureBar - firstDepressureBar
                 )
-                CurrentState = State.Apply;
-            else if (OverchargeElimination && pressureBar > RegulatorPressureBar)
-                CurrentState = State.OverchargeElimination;
-            else if (Overcharge && pressureBar <= RegulatorPressureBar + OverchargePressureBar)
-                CurrentState = State.Overcharge;
-            else if (QuickRelease && !Neutral && pressureBar < RegulatorPressureBar)
-                CurrentState = State.QuickRelease;
-            else if (
-                !Neutral && (
-                    Release && pressureBar < RegulatorPressureBar
-                    || !FirstDepression && pressureBar > RegulatorPressureBar - BrakeReleasedDepressureBar && pressureBar < RegulatorPressureBar
-                    || pressureBar < RegulatorPressureBar - FullServReductionBar()
-                    )
-                )
-                CurrentState = State.Release;
+                currentState = State.Apply;
+            else if (/*overchargeElimination && */pressureBar > regulatorPressureBar)
+                currentState = State.OverchargeElimination;
+            else if (overcharge && pressureBar <= regulatorPressureBar + overchargePressureBar)
+                currentState = State.Overcharge;
+            else if (quickRelease && pressureBar < regulatorPressureBar)
+                currentState = State.QuickRelease;
+            else if (release && pressureBar < regulatorPressureBar
+                    || !firstDepression && pressureBar > regulatorPressureBar - brakeReleasedDepressureBar && pressureBar < regulatorPressureBar
+                    || pressureBar < regulatorPressureBar - FullServReductionBar())
+                currentState = State.Release;
             else
-                CurrentState = State.Lap;
+                currentState = State.Lap;
 
-            switch (CurrentState)
+            switch (currentState)
             {
                 case State.Overcharge:
                     SetUpdateValue(-1);
@@ -157,14 +149,14 @@ namespace ORTS.Scripting.Script
                     pressureBar += QuickReleaseRateBarpS() * elapsedClockSeconds;
                     epPressureBar -= QuickReleaseRateBarpS() * elapsedClockSeconds;
 
-                    if (pressureBar > MaxPressureBar() + OverchargePressureBar)
-                        pressureBar = MaxPressureBar() + OverchargePressureBar;
+                    if (pressureBar > MaxPressureBar() + overchargePressureBar)
+                        pressureBar = MaxPressureBar() + overchargePressureBar;
                     break;
 
                 case State.OverchargeElimination:
                     SetUpdateValue(-1);
 
-                    pressureBar -= OverchargeEleminationPressureRateBarpS * elapsedClockSeconds;
+                    pressureBar -= overchargeEleminationPressureRateBarpS * elapsedClockSeconds;
 
                     if (pressureBar < MaxPressureBar())
                         pressureBar = MaxPressureBar();
@@ -176,8 +168,8 @@ namespace ORTS.Scripting.Script
                     pressureBar += QuickReleaseRateBarpS() * elapsedClockSeconds;
                     epPressureBar -= QuickReleaseRateBarpS() * elapsedClockSeconds;
 
-                    if (pressureBar > RegulatorPressureBar)
-                        pressureBar = RegulatorPressureBar;
+                    if (pressureBar > regulatorPressureBar)
+                        pressureBar = regulatorPressureBar;
                     break;
 
                 case State.Release:
@@ -186,8 +178,8 @@ namespace ORTS.Scripting.Script
                     pressureBar += ReleaseRateBarpS() * elapsedClockSeconds;
                     epPressureBar -= ReleaseRateBarpS() * elapsedClockSeconds;
 
-                    if (pressureBar > RegulatorPressureBar)
-                        pressureBar = RegulatorPressureBar;
+                    if (pressureBar > regulatorPressureBar)
+                        pressureBar = regulatorPressureBar;
                     break;
 
                 case State.Lap:
@@ -200,8 +192,8 @@ namespace ORTS.Scripting.Script
                     pressureBar -= ApplyRateBarpS() * elapsedClockSeconds;
                     epPressureBar += ApplyRateBarpS() * elapsedClockSeconds;
 
-                    if (pressureBar < Math.Max(RegulatorPressureBar - FullServReductionBar(), 0.0f))
-                        pressureBar = Math.Max(RegulatorPressureBar - FullServReductionBar(), 0.0f);
+                    if (pressureBar < Math.Max(regulatorPressureBar - FullServReductionBar(), 0.0))
+                        pressureBar = Math.Max(regulatorPressureBar - FullServReductionBar(), 0.0);
                     break;
 
                 case State.Emergency:
@@ -219,28 +211,30 @@ namespace ORTS.Scripting.Script
             if (epPressureBar < 0)
                 epPressureBar = 0;
 
-            if (QuickRelease && pressureBar == RegulatorPressureBar)
-                QuickRelease = false;
+            if (quickRelease && pressureBar == regulatorPressureBar)
+                quickRelease = false;
+
+            return new Tuple<double, double>(pressureBar, epPressureBar);
         }
 
-        public override void UpdateEngineBrakePressure(ref float pressureBar, float elapsedClockSeconds)
+        public override double UpdateEngineBrakePressure(double pressureBar, double elapsedClockSeconds)
         {
-            switch (CurrentState)
+            switch (currentState)
             {
                 case State.Release:
-                    SetCurrentValue(ReleaseValue);
+                    SetCurrentValue(releaseValue);
                     SetUpdateValue(-1);
                     pressureBar -= ReleaseRateBarpS() * elapsedClockSeconds;
                     break;
-                
+
                 case State.Apply:
-                    SetCurrentValue(ApplyValue);
+                    SetCurrentValue(applyValue);
                     SetUpdateValue(0);
                     pressureBar += ApplyRateBarpS() * elapsedClockSeconds;
                     break;
-                
+
                 case State.Emergency:
-                    SetCurrentValue(EmergencyValue);
+                    SetCurrentValue(emergencyValue);
                     SetUpdateValue(1);
                     pressureBar += EmergencyRateBarpS() * elapsedClockSeconds;
                     break;
@@ -250,6 +244,7 @@ namespace ORTS.Scripting.Script
                 pressureBar = MaxPressureBar();
             if (pressureBar < 0)
                 pressureBar = 0;
+            return pressureBar;
         }
 
         public override void HandleEvent(BrakeControllerEvent evt)
@@ -257,19 +252,19 @@ namespace ORTS.Scripting.Script
             switch (evt)
             {
                 case BrakeControllerEvent.StartIncrease:
-                    Apply = true;
+                    apply = true;
                     break;
 
                 case BrakeControllerEvent.StopIncrease:
-                    Apply = false;
+                    apply = false;
                     break;
 
                 case BrakeControllerEvent.StartDecrease:
-                    Release = true;
+                    release = true;
                     break;
 
                 case BrakeControllerEvent.StopDecrease:
-                    Release = false;
+                    release = false;
                     break;
             }
         }
@@ -279,11 +274,11 @@ namespace ORTS.Scripting.Script
             switch (evt)
             {
                 case BrakeControllerEvent.StartIncrease:
-                    Apply = true;
+                    apply = true;
                     break;
 
                 case BrakeControllerEvent.StartDecrease:
-                    Release = true;
+                    release = true;
                     break;
 
                 case BrakeControllerEvent.SetCurrentPercent:
@@ -294,18 +289,18 @@ namespace ORTS.Scripting.Script
 
                         if (percent < 40)
                         {
-                            Apply = true;
-                            Release = false;
+                            apply = true;
+                            release = false;
                         }
                         else if (percent > 60)
                         {
-                            Apply = false;
-                            Release = true;
+                            apply = false;
+                            release = true;
                         }
                         else
                         {
-                            Apply = false;
-                            Release = false;
+                            apply = false;
+                            release = false;
                         }
                     }
                     break;
@@ -327,7 +322,7 @@ namespace ORTS.Scripting.Script
 
         public override ControllerState GetState()
         {
-            switch (CurrentState)
+            switch (currentState)
             {
                 case State.Overcharge:
                     return ControllerState.Overcharge;
@@ -370,36 +365,36 @@ namespace ORTS.Scripting.Script
         private void SetValue(float v)
         {
             SetCurrentValue(v);
-            
-            if (CurrentValue() == EmergencyValue)
+
+            if (CurrentValue() == emergencyValue)
             {
-                Apply = false;
-                Release = false;
-                QuickRelease = false;
+                apply = false;
+                release = false;
+                quickRelease = false;
             }
-            else if (CurrentValue() == ApplyValue)
+            else if (CurrentValue() == applyValue)
             {
-                Apply = true;
-                Release = false;
-                QuickRelease = false;
+                apply = true;
+                release = false;
+                quickRelease = false;
             }
-            else if (CurrentValue() == LapValue)
+            else if (CurrentValue() == lapValue)
             {
-                Apply = false;
-                Release = false;
-                QuickRelease = false;
+                apply = false;
+                release = false;
+                quickRelease = false;
             }
-            else if (CurrentValue() == ReleaseValue)
+            else if (CurrentValue() == releaseValue)
             {
-                Apply = false;
-                Release = true;
-                QuickRelease = false;
+                apply = false;
+                release = true;
+                quickRelease = false;
             }
-            else if (CurrentValue() == QuickReleaseValue)
+            else if (CurrentValue() == quickReleaseValue)
             {
-                Apply = false;
-                Release = false;
-                QuickRelease = true;
+                apply = false;
+                release = false;
+                quickRelease = true;
             }
         }
     }
